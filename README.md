@@ -1,8 +1,22 @@
 # capsule-litellm
 
+[![AI Agents](https://img.shields.io/badge/AI%20Agents-AGENTS.md-blueviolet.svg)](./AGENTS.md)
+
 [Capsule Protocol](https://github.com/quantumpipes/capsule) integration for [LiteLLM](https://github.com/BerriAI/litellm).
 
 Every LLM call through LiteLLM automatically produces a sealed, hash-chained Capsule. Zero-config audit trail.
+
+> **AI coding agents:** start with [AGENTS.md](./AGENTS.md). It contains commands, the tiny integration surface, and the "audit must never break the user's LLM call" invariant.
+
+**Try it on your codebase.** Paste this into Claude Code, Cursor, Codex, or any AI coding agent:
+
+```text
+Read the capsule-litellm README and AGENTS.md at https://github.com/quantumpipes/capsule-litellm.
+Then find every place my codebase calls litellm.completion or litellm.acompletion.
+Show me the two-line change per entry point to register CapsuleLogger, flag any
+callers that already set litellm.callbacks (conflict risk), and propose where the
+resulting Capsule chain should be stored.
+```
 
 ## Install
 
