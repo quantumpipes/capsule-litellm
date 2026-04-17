@@ -8,7 +8,9 @@ Every LLM call through LiteLLM automatically produces a sealed, hash-chained Cap
 
 > **AI coding agents:** start with [AGENTS.md](./AGENTS.md). It contains commands, the tiny integration surface, and the "audit must never break the user's LLM call" invariant.
 
-**Try it on your codebase.** Paste this into Claude Code, Cursor, Codex, or any AI coding agent:
+## Explore the fit with your AI coding agent
+
+Paste this prompt into Claude Code, Cursor, Codex, or any other agent:
 
 ```text
 Read the capsule-litellm README and AGENTS.md at https://github.com/quantumpipes/capsule-litellm.
@@ -17,6 +19,8 @@ Show me the two-line change per entry point to register CapsuleLogger, flag any
 callers that already set litellm.callbacks (conflict risk), and propose where the
 resulting Capsule chain should be stored.
 ```
+
+---
 
 ## Install
 
