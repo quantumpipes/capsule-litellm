@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from litellm.integrations.custom_logger import CustomLogger
 
-from qp_capsule import Capsule, CapsuleType, Capsules
+from qp_capsule import Capsule, CapsuleType, Capsules, ToolCall
 
 if TYPE_CHECKING:
     from litellm import ModelResponse
@@ -55,7 +56,11 @@ class CapsuleLogger(CustomLogger):
         *,
         swallow_errors: bool = True,
     ):
-        self._capsules = capsules or Capsules()
+        # Surface storage/config errors at startup at least once. ``Capsules()``
+        # raises if the storage backend cannot be initialised (missing extra,
+        # unreachable database). Swallowing per-call errors must NOT also hide a
+        # broken configuration that means every capsule is silently dropped.
+        self._capsules = capsules if capsules is not None else Capsules()
         self._agent_id = agent_id
         self._domain = domain
         self._capsule_type = capsule_type
@@ -71,7 +76,7 @@ class CapsuleLogger(CustomLogger):
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        self._record(kwargs, response_obj, start_time, end_time, success=True)
+        self._record_sync(kwargs, response_obj, start_time, end_time, success=True)
 
     def log_failure_event(
         self,
@@ -80,7 +85,7 @@ class CapsuleLogger(CustomLogger):
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        self._record(kwargs, response_obj, start_time, end_time, success=False)
+        self._record_sync(kwargs, response_obj, start_time, end_time, success=False)
 
     # --- Async callbacks ---
 
@@ -91,7 +96,7 @@ class CapsuleLogger(CustomLogger):
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        self._record(kwargs, response_obj, start_time, end_time, success=True)
+        await self._record_async(kwargs, response_obj, start_time, end_time, success=True)
 
     async def async_log_failure_event(
         self,
@@ -100,11 +105,26 @@ class CapsuleLogger(CustomLogger):
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        self._record(kwargs, response_obj, start_time, end_time, success=False)
+        await self._record_async(kwargs, response_obj, start_time, end_time, success=False)
 
     # --- Core ---
 
-    def _record(
+    async def _persist(self, capsule: Capsule) -> None:
+        """Chain, seal, and store a capsule durably.
+
+        Delegates to ``CapsuleChain.seal_and_store`` so the capsule is hash-chained,
+        cryptographically sealed (Ed25519, plus ML-DSA-65 when available), and
+        written to durable storage in one optimistic-retry transaction.
+
+        Args:
+            capsule: The fully-built, unsealed capsule to persist.
+
+        Raises:
+            Exception: Propagated from the chain/storage backend on failure.
+        """
+        await self._capsules.chain.seal_and_store(capsule, seal=self._capsules.seal)
+
+    async def _record_async(
         self,
         kwargs: dict[str, Any],
         response_obj: Any,
@@ -113,11 +133,47 @@ class CapsuleLogger(CustomLogger):
         *,
         success: bool,
     ) -> None:
+        """Build and durably persist a capsule from an async LiteLLM callback."""
         try:
             capsule = self._build(kwargs, response_obj, start_time, end_time, success=success)
-            self._capsules.chain.append(capsule)
-            self._capsules.seal.seal(capsule)
-            self._capsules.storage.store(capsule)
+            await self._persist(capsule)
+        except Exception:
+            if self._swallow:
+                logger.exception("capsule-litellm: failed to record capsule")
+            else:
+                raise
+
+    def _record_sync(
+        self,
+        kwargs: dict[str, Any],
+        response_obj: Any,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        success: bool,
+    ) -> None:
+        """Build and durably persist a capsule from a sync LiteLLM callback.
+
+        LiteLLM sync callbacks may fire with or without a running event loop.
+        Mirrors ``qp_capsule.audit``'s sync wrapper: schedule on the running loop
+        when present, otherwise drive the coroutine to completion with
+        ``asyncio.run``.
+        """
+        try:
+            capsule = self._build(kwargs, response_obj, start_time, end_time, success=success)
+            coro = self._persist(capsule)
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                # Inside a running loop (e.g. LiteLLM invoked the sync hook from
+                # async code): schedule without blocking the loop.
+                loop.create_task(coro)
+            else:
+                asyncio.run(coro)
         except Exception:
             if self._swallow:
                 logger.exception("capsule-litellm: failed to record capsule")
@@ -172,14 +228,14 @@ class CapsuleLogger(CustomLogger):
 
         # Execution
         capsule.execution.tool_calls = [
-            {
-                "tool": f"litellm.{call_type}",
-                "arguments": {"model": model, "message_count": len(messages)},
-                "result": result_text[:_RESULT_TRUNCATE] if result_text else None,
-                "success": success,
-                "duration_ms": duration_ms,
-                "error": error_msg,
-            }
+            ToolCall(
+                tool=f"litellm.{call_type}",
+                arguments={"model": model, "message_count": len(messages)},
+                result=result_text[:_RESULT_TRUNCATE] if result_text else None,
+                success=success,
+                duration_ms=duration_ms,
+                error=error_msg,
+            )
         ]
         capsule.execution.duration_ms = duration_ms
         capsule.execution.resources_used = {
